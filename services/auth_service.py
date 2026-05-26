@@ -180,44 +180,54 @@ class AuthService:
             self._save()
             return self._public_item(item), raw_key
 
-    def sync_user_key(self, *, email: str, key: str, enabled: bool) -> None:
+    def sync_user_key(self, key: str) -> None:
         # Custom integration: mirror an external service key into chatgpt2api's user-key store.
-        normalized_email = self._clean(email)
         normalized_key = self._clean(key)
-        if not normalized_email:
-            raise ValueError("email is required")
         if not normalized_key:
             raise ValueError("key is required")
         admin_key = self._clean(config.auth_key)
         if admin_key and hmac.compare_digest(normalized_key, admin_key):
             raise ValueError("这个密钥和管理员密钥冲突了，请换一个新的密钥")
         key_hash = _hash_key(normalized_key)
-        name = f"{normalized_email} / {key_hash[:8]}"
+        name = normalized_key
+        with self._lock:
+            self._reload_locked()
+            found = self._find_user_key_by_hash_locked(key_hash)
+            if found is not None:
+                index, item = found
+                next_item = dict(item)
+                next_item["name"] = self._build_name_locked(name, role="user", exclude_id=self._clean(item.get("id")))
+                next_item["enabled"] = True
+                self._items[index] = next_item
+                self._save()
+                return
+            if self._has_key_hash_locked(key_hash):
+                raise ValueError("这个专用密钥已经存在，请换一个新的密钥")
+            item = {
+                "id": uuid.uuid4().hex[:12],
+                "name": self._build_name_locked(name, role="user"),
+                "role": "user",
+                "key_hash": key_hash,
+                "enabled": True,
+                "created_at": _now_iso(),
+                "last_used_at": None,
+            }
+            self._items.append(item)
+            self._save()
+
+    def delete_user_key_by_raw_key(self, key: str) -> None:
+        # Custom integration: remove an external service key by its raw value.
+        normalized_key = self._clean(key)
+        if not normalized_key:
+            raise ValueError("key is required")
+        key_hash = _hash_key(normalized_key)
         with self._lock:
             self._reload_locked()
             found = self._find_user_key_by_hash_locked(key_hash)
             if found is None:
-                if not enabled:
-                    return
-                if self._has_key_hash_locked(key_hash):
-                    raise ValueError("这个专用密钥已经存在，请换一个新的密钥")
-                item = {
-                    "id": uuid.uuid4().hex[:12],
-                    "name": self._build_name_locked(name, role="user"),
-                    "role": "user",
-                    "key_hash": key_hash,
-                    "enabled": True,
-                    "created_at": _now_iso(),
-                    "last_used_at": None,
-                }
-                self._items.append(item)
-                self._save()
                 return
-            index, item = found
-            next_item = dict(item)
-            next_item["name"] = self._build_name_locked(name, role="user", exclude_id=self._clean(item.get("id")))
-            next_item["enabled"] = bool(enabled)
-            self._items[index] = next_item
+            index, _ = found
+            self._items.pop(index)
             self._save()
 
     def update_key(
